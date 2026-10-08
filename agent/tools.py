@@ -181,8 +181,31 @@ def list_my_orders(ctx: AuthContext) -> dict[str, Any]:
         scope is baked into which query you run. That is the point of the
         tool: the model cannot ask for someone else's orders through it.
     """
-    ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement list_my_orders")
+        ### YOUR CODE HERE (HW1)
+    if ctx.role == "support":
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": (
+                "Support staff have no orders of their own. "
+                "Look up a specific order with get_order instead."
+            ),
+        }
+
+    with db.connection() as conn:
+        if ctx.role == "shopper":
+            orders = db.list_orders_for_user(conn, ctx.user_id, DEFAULT_ORDER_LIMIT)
+        elif ctx.role == "merchant" and ctx.store_id is not None:
+            orders = db.list_orders_for_store(conn, ctx.store_id, DEFAULT_ORDER_LIMIT)
+        else:
+            return {
+                "ok": False,
+                "error": "invalid_argument",
+                "reason": f"Cannot list orders for role {ctx.role!r} without a store.",
+            }
+
+    results = [order.to_public_dict() for order in orders]
+    return {"ok": True, "orders": results, "count": len(results)}
 
 
 def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]:
@@ -227,8 +250,36 @@ def cancel_order(ctx: AuthContext, order_id: int, reason: str) -> dict[str, Any]
     paused = kill_switch("cancel_order")
     if paused is not None:
         return {"ok": False, "error": "paused", "reason": paused}
-    ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement cancel_order")
+        ### YOUR CODE HERE (HW1)
+    with db.connection() as conn:
+        order = db.get_order(conn, order_id)
+        if order is None:
+            return {
+                "ok": False,
+                "error": "not_found",
+                "reason": f"No order has the id {order_id}.",
+            }
+
+        # Rule 1: scope. Checked first so an out-of-scope caller learns nothing.
+        if not can_cancel_order(ctx, order.user_id, order.store_id):
+            return permission_denied(
+                f"A {ctx.role} may not cancel order {order_id}."
+            )
+
+        # Rule 2: only orders that have not shipped yet can be cancelled.
+        if order.status != "placed":
+            return {
+                "ok": False,
+                "error": "not_eligible",
+                "reason": (
+                    f"Order {order_id} is {order.status!r}. "
+                    "Orders can be cancelled only before shipment."
+                ),
+            }
+
+        db.set_order_status(conn, order_id, "cancelled")
+
+    return {"ok": True, "order_id": order_id, "status": "cancelled"}
 
 
 def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
@@ -262,5 +313,46 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
         (at most 5), each as the dict returned by agent.db. If no orders
         match, return {"ok": True, "orders": []}.
     """
-    ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement find_order")
+       ### YOUR CODE HERE (HW1)
+    # Words that say nothing about which product the user means.
+    filler = {"the", "and", "for", "with", "from", "that", "this", "bought",
+              "buy", "ordered", "order", "orders", "purchased", "got", "last",
+              "week", "month", "year", "ago", "item", "thing"}
+
+    def words_in(text):
+        """Lowercase words with punctuation removed and plural 's' dropped."""
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in text.lower())
+        words = set()
+        for word in cleaned.split():
+            if len(word) > 3 and word.endswith("s"):
+                word = word[:-1]
+            words.add(word)
+        return words
+
+    query_words = {w for w in words_in(query) if len(w) >= 3 and w not in filler}
+    if not query_words:
+        return {"ok": True, "orders": []}
+
+    # The scope comes from the ID badge (ctx), never from the query.
+    with db.connection() as conn:
+        if ctx.role == "shopper":
+            candidates = db.list_order_search_candidates(conn, user_id=ctx.user_id)
+        elif ctx.role == "merchant" and ctx.store_id is not None:
+            candidates = db.list_order_search_candidates(conn, store_id=ctx.store_id)
+        elif ctx.role == "support":
+            candidates = db.list_order_search_candidates(conn, all_orders=True)
+        else:
+            return permission_denied(
+                f"Cannot search orders for role {ctx.role!r} without a store."
+            )
+        titles = {product.id: product.title for product in db.list_products(conn)}
+
+    # Match first (keeping the newest-first order), then keep at most five.
+    matches = []
+    for order in candidates:
+        title = titles.get(order.product_id, "")
+        if query_words & words_in(title):
+            matches.append(order.to_public_dict())
+            if len(matches) == 5:
+                break
+    return {"ok": True, "orders": matches}
