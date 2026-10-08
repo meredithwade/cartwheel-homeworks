@@ -52,8 +52,21 @@ def get_policy(ctx: AuthContext, policy_id: str) -> dict[str, Any]:
     Implementation notes:
         agent.helpcenter.load_policy_docs() returns every parsed doc.
     """
-    ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement get_policy")
+   ### YOUR CODE HERE (HW1)
+    for doc in load_policy_docs():
+        if doc.policy_id == policy_id:
+            return {
+                "ok": True,
+                "policy_id": doc.policy_id,
+                "title": doc.title,
+                "audience": doc.audience,
+                "body": doc.body,
+            }
+    return {
+        "ok": False,
+        "error": "not_found",
+        "reason": f"No policy document has the id {policy_id!r}.",
+    }
 
 
 def search_products(
@@ -96,7 +109,54 @@ def search_products(
         Use `with db.connection() as conn:` to close the database automatically.
     """
     ### YOUR CODE HERE (HW1)
-    raise NotImplementedError("HW1: implement search_products")
+    words = query.lower().split()
+    if not words:
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": "The search query must not be empty.",
+        }
+    if max_price_usd is not None and max_price_usd <= 0:
+        return {
+            "ok": False,
+            "error": "invalid_argument",
+            "reason": "max_price_usd must be greater than zero.",
+        }
+    limit = max(1, min(limit, MAX_SEARCH_LIMIT))
+
+    with db.connection() as conn:
+        store_id = None
+        if store is not None:
+            found = db.get_store_by_name(conn, store)
+            if found is None:
+                return {
+                    "ok": False,
+                    "error": "not_found",
+                    "reason": f"No store matches {store!r}.",
+                }
+            store_id = found.id
+        products = db.list_products(conn, store_id)
+
+    matches = []
+    for product in products:
+        text = f"{product.title} {product.description}".lower()
+        if not all(word in text for word in words):
+            continue
+        if max_price_usd is not None and product.price_usd > max_price_usd:
+            continue
+        matches.append(product)
+
+    matches.sort(key=lambda product: (product.price_usd, product.id))
+    results = [
+        {
+            "product_id": product.id,
+            "store_id": product.store_id,
+            "title": product.title,
+            "price_usd": product.price_usd,
+        }
+        for product in matches[:limit]
+    ]
+    return {"ok": True, "products": results, "count": len(results)}
 
 
 def list_my_orders(ctx: AuthContext) -> dict[str, Any]:
