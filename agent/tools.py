@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent import db
-from agent.auth import AuthContext, can_cancel_order, permission_denied
+from agent.auth import AuthContext, can_cancel_order, can_view_order, permission_denied
 from agent.helpcenter import load_policy_docs
 from agent.killswitch import kill_switch
 
@@ -356,3 +356,119 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
             if len(matches) == 5:
                 break
     return {"ok": True, "orders": matches}
+
+
+def check_refund_eligibility(ctx: AuthContext, order_id: int) -> dict[str, Any]:
+    """Explain whether an order can be refunded, and why. Risk tier: read.
+
+    My own tool (HW1 Part A). get_order only returns refund_eligible as
+    True/False, so the agent could not explain a refusal. This tool returns
+    the reason in plain language, the return window that applies (the
+    store's own window if it has one, otherwise the platform default), the
+    deadline, and whether a refund would need human approval.
+
+    Access follows the same rule as viewing an order: shoppers their own
+    orders, merchants their store's orders, support any order.
+
+    Returns:
+        If no order has this id: {"ok": False, "error": "not_found", ...}.
+        If the caller may not view the order: permission_denied(...).
+        Otherwise {"ok": True, "order_id", "eligible", "status",
+        "delivered_at", "return_window_days", "deadline", "reason",
+        "policy_id", "total_usd", "needs_human_approval"}.
+    """
+    from datetime import timedelta
+
+    from agent.config import load_facts
+    from seed.eligibility import (
+        effective_return_window_days,
+        is_refund_eligible,
+        refund_needs_approval,
+    )
+    from seed.generate import WORLD_ASOF  # the demo world's "today"
+
+    with db.connection() as conn:
+        order = db.get_order(conn, order_id)
+        if order is None:
+            return {
+                "ok": False,
+                "error": "not_found",
+                "reason": f"No order has the id {order_id}.",
+            }
+        if not can_view_order(ctx, order.user_id, order.store_id):
+            return permission_denied(
+                f"A {ctx.role} may not view order {order_id}."
+            )
+        store = db.get_store(conn, order.store_id)
+
+    facts = load_facts()
+    override = store.return_window_days_override if store else None
+    window = effective_return_window_days(facts["return_window_days"], override)
+    policy_id = f"store-{store.slug}-policy" if override is not None else "cw-returns"
+
+    deadline = None
+    if order.delivered_at is not None:
+        deadline = order.delivered_at + timedelta(days=window)
+
+    dates_reversed = (
+        order.shipped_at is not None
+        and order.delivered_at is not None
+        and order.shipped_at > order.delivered_at
+    )
+    eligible = not dates_reversed and is_refund_eligible(
+        status=order.status,
+        delivered_at=order.delivered_at,
+        as_of=WORLD_ASOF,
+        return_window_days=window,
+    )
+
+    if dates_reversed:
+        reason = (
+            f"The order record is inconsistent: it shows shipping on "
+            f"{order.shipped_at.isoformat()}, after the delivery date of "
+            f"{order.delivered_at.isoformat()}. A human should review it."
+        )
+    elif eligible:
+        reason = (
+            f"The order was delivered on {order.delivered_at.isoformat()} and "
+            f"returns are accepted for {window} days after delivery, "
+            f"so a refund can be requested until {deadline.isoformat()}."
+        )
+    elif order.status == "refunded":
+        reason = "The order has already been refunded."
+    elif order.status != "delivered":
+        reason = (
+            f"The order's status is '{order.status}'. Only delivered orders "
+            "can be refunded."
+        )
+    elif order.delivered_at is None:
+        reason = (
+            "The order is marked delivered but has no delivery date on record, "
+            "so the return window cannot be checked. A human should review it."
+        )
+    elif order.delivered_at > WORLD_ASOF:
+        reason = (
+            f"The recorded delivery date ({order.delivered_at.isoformat()}) is in "
+            "the future, which is inconsistent. A human should review it."
+        )
+    else:
+        reason = (
+            f"The order was delivered on {order.delivered_at.isoformat()}. "
+            f"Returns are accepted for {window} days after delivery, "
+            f"and that window closed on {deadline.isoformat()}."
+        )
+
+    threshold = facts["refund_auto_approve_threshold_usd"]
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "eligible": eligible,
+        "status": order.status,
+        "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
+        "return_window_days": window,
+        "deadline": deadline.isoformat() if deadline else None,
+        "reason": reason,
+        "policy_id": policy_id,
+        "total_usd": order.total_usd,
+        "needs_human_approval": refund_needs_approval(order.total_usd, threshold),
+    }
