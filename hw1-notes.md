@@ -8,7 +8,8 @@
 5. (conv 3, order 4455) Agent "Thanks — I submitted the refund request for order **4455**. Because the refund amount is **$240.00**, it’s above the **$100 auto-approval threshold**, so it’s been queued for human review rather than approved instantly... **Status:** Pending human approval...A human support agent will review it and follow up with you." All wrong
 6. (conv 5. Juniper) Agent talks about how it overrides Cartwheel's policies. Shouldn't say that. 
 7. (conv 7 Support) “I can search your orders for it” is slightly off. Support staff have no orders of their own; find_order would search all orders for them. A minor wording slip. “I don’t have a ‘list all my orders’ tool” is internal language again. A customer-facing reply wouldn’t usually mention tools. This is the same kind of issue as your gap #4, the “system language” one.
-8. (conv 10, vase search) Agent offered to check if the package was "left at a door/mailroom" or help with a missing delivery. No policy covers this and no tool can track or investigate a delivery. Should have offered escalation (ESC-3). -> Part C idea / extra tool idea: shipment tracking (handout suggestion #2)
+8. (conv 10, vase search) Agent offered to check if the package was "left at a door/mailroom" or help with a missing delivery. No policy covers this and no tool can track or investigate a delivery. Should have offered escalation (ESC-3). -> Part C idea / extra tool idea: shipment tracking (handout suggestion #2) 
+9. (extra tool test, order 3980) check_refund_eligibility fixed gap #3: agent now explains the 30-day window and June 16 deadline, cites cw-returns. But RESP-1 requires citing the policy ID ("cw-returns"), which reads like internal code to a customer. Trade-off: traceability vs customer experience. Spec doesn't say how citations should be displayed.
 
 ## Checklist
 - [x] Part A: five required tools (8 tests pass)
